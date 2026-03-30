@@ -1,0 +1,165 @@
+<?php
+// File: local/sendresults/send.php
+
+defined('MOODLE_INTERNAL') || die();
+
+require_once(__DIR__ . '/../../config.php');
+require_once($CFG->libdir . '/filelib.php');
+require_once($CFG->dirroot . '/local/sendresults/export.php');
+
+/**
+ * Check for internet connectivity by attempting to open a socket.
+ */
+function local_sendresults_check_internet($host = '8.8.8.8', $port = 53, $timeout = 2): bool {
+    return @fsockopen($host, $port, $errno, $errstr, $timeout) !== false;
+}
+
+/**
+ * Send CBT results: Generate CSV, send to central server, and email.
+ */
+function local_sendresults_send(int $courseid, int $quizid, bool $downloadoptional = false): bool {
+    global $CFG;
+
+    error_log("[SENDRESULT] === START sending results for course $courseid, quiz $quizid ===");
+
+    // Get plugin settings
+    $server_url   = get_config('local_sendresults', 'serverurl');
+    $api_key      = get_config('local_sendresults', 'apikey');
+    $servername   = get_config('local_sendresults', 'localservername');
+    $emailaddress = get_config('local_sendresults', 'emailrecipient');
+
+    // Debug log config
+    error_log("[SENDRESULT] DEBUG - Plugin config:");
+    error_log("[SENDRESULT] server_url: $server_url");
+    error_log("[SENDRESULT] api_key: $api_key");
+    error_log("[SENDRESULT] servername: $servername");
+    error_log("[SENDRESULT] emailrecipient: $emailaddress");
+
+    // 1. Generate CSV file
+    $csvfile = local_sendresults_generate_csv($courseid, $quizid);
+    if (empty($csvfile) || !file_exists($csvfile)) {
+        error_log("[SENDRESULT] ❌ CSV generation failed or file missing: $csvfile");
+        return false;
+    }
+    error_log("[SENDRESULT] ✅ CSV generated at: $csvfile");
+
+    // Optional: debug CSV content
+    $csv_preview = file_get_contents($csvfile, false, null, 0, 500);
+    error_log("[SENDRESULT] CSV Preview (first 500 bytes):\n$csv_preview");
+
+    // 2. Retry internet connectivity before sending
+    $max_retries = 3;
+    $retry_delay = 5;
+    $internet_available = false;
+
+    for ($attempt = 1; $attempt <= $max_retries; $attempt++) {
+        if (local_sendresults_check_internet()) {
+            $internet_available = true;
+            break;
+        } else {
+            error_log("[SENDRESULT] ❌ Internet check failed (attempt $attempt of $max_retries)");
+            if ($attempt < $max_retries) {
+                sleep($retry_delay);
+            }
+        }
+    }
+
+    if (!$internet_available) {
+        error_log("[SENDRESULT] ❌ No internet after $max_retries attempts. Aborting send.");
+        if (CLI_SCRIPT !== true) {
+            \core\notification::error('❌ CBT Result not sent. Check your internet connection.');
+        }
+        return false;
+    }
+
+    // 3. Prepare JSON data
+    $results_array = local_sendresults_prepare_data_array($courseid, $quizid);
+    error_log("[SENDRESULT] results_array size: " . count($results_array));
+    error_log("[SENDRESULT] JSON Preview:\n" . substr(json_encode($results_array, JSON_PRETTY_PRINT), 0, 1000));
+
+    // 4. Send to central server
+    if ($server_url && $api_key && !empty($results_array)) {
+        $postfields = [
+            'api_key'    => $api_key,
+            'servername' => $servername,
+            'courseid'   => $courseid,
+            'quizid'     => $quizid,
+            'results'    => json_encode($results_array),
+            'file'       => curl_file_create($csvfile, 'text/csv', basename($csvfile))
+        ];
+
+        $curl = new curl();
+        $response = $curl->post($server_url, $postfields);
+        $httpcode = $curl->get_info()['http_code'];
+        $curlerror = $curl->error;
+
+        if ($httpcode == 200) {
+            error_log("[SENDRESULT] ✅ Successfully sent results to central server.");
+        } else {
+            error_log("[SENDRESULT] 🛰 Failed to send to $server_url");
+            error_log("[SENDRESULT] HTTP Code: $httpcode");
+            if ($curlerror) {
+                error_log("[SENDRESULT] CURL Error: $curlerror");
+            }
+            error_log("[SENDRESULT] Response: $response");
+            return false;
+        }
+    }
+
+    // 5. Send via email
+    if (empty($emailaddress) || !validate_email($emailaddress)) {
+        error_log("[SENDRESULT] ❌ Invalid or missing email address: $emailaddress");
+        return false;
+    }
+
+    error_log("[SENDRESULT] 📧 Sending email to: $emailaddress");
+
+    $recipient = (object)[
+        'id' => -1,
+        'email' => $emailaddress,
+        'firstname' => 'CBT',
+        'lastname' => 'Admin',
+        'username' => 'cbt_admin',
+        'confirmed' => 1,
+        'auth' => 'manual',
+        'mnethostid' => $CFG->mnet_localhost_id,
+        'deleted' => 0,
+        'maildisplay' => true,
+    ];
+
+    // Get email message from settings, with fallback
+    $body_template = get_config('local_sendresults', 'emailmessage');
+    if (empty($body_template)) {
+        $body_template = "Attached is the result CSV file generated by '{servername}' CBT server.\n\nRegards,\nCBT Server";
+    }
+    $body = str_replace('{servername}', $servername, $body_template);
+
+    $subject = "CBT Results from $servername (Course ID: $courseid, Quiz ID: $quizid)";
+    $supportuser = core_user::get_support_user();
+
+    $success = email_to_user(
+        $recipient,
+        $supportuser,
+        $subject,
+        $body,
+        $body,
+        $csvfile,
+        basename($csvfile),
+        'text/csv'
+    );
+
+    if ($success) {
+        error_log("[SENDRESULT] ✅ Email sent to $emailaddress with attachment.");
+    } else {
+        error_log("[SENDRESULT] ❌ Failed to send email.");
+    }
+
+    // 6. Optional browser download
+    if ($downloadoptional && file_exists($csvfile)) {
+        error_log("[SENDRESULT] ⬇️ Downloading CSV to browser.");
+        send_file($csvfile, 'cbt_results.csv', 0, 0, true, true);
+    }
+
+    error_log("[SENDRESULT] 🏁 END sending results");
+    return $success;
+}
