@@ -126,28 +126,23 @@ It proves that **robust, scalable CBT systems can be deployed without requiring 
 
 ## 📸 Screenshots
 
-### 🖥️ CBT Login Interface (Admin & Candidate)
-![CBT Interface](screenshot/Log in to the site PCN CBT Portal.png)
-
----
-
 ### 🖥️ Candidate Dashboard
-![CBT Interface](screenshot/Candidate Dashboard.png)
+![CBT Interface](Screenshot/Candidate Dashboard.png)
 
 ---
 
 ### 🖥️ CBT Exam Interface
-![CBT Interface](screenshot/Exam Attempt Window.png)
+![CBT Interface](Screenshot/Exam Attempt Window.png)
 
 ---
 
 ### ⚙️ Admin Control Panel
-![Admin](screenshots/PCN CBT Portal Admin.png)
+![Admin](Screenshot/PCN CBT Portal Admin.png)
 
 ---
 
 ### 📊 Exams Setup
-![Results](screenshots/Setting Up Exams.png)
+![Results](Screenshot/Setting Up Exams.png)
 
 ---
 
